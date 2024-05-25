@@ -1,11 +1,12 @@
 package com.example.Service;
 
 import java.time.LocalDateTime;
-import java.util.Objects;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
-import org.apache.el.stream.Optional;
-import org.hibernate.mapping.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -20,33 +21,44 @@ public class ContactService {
     @Autowired
     private ContactRepository contactRepository;
 
-    @Transactional
     public ContactResponse identifyContact(String phoneNumber, String email) {
-        Optional<Contact> contactByPhone = contactRepository.findByPhoneNumber(phoneNumber);
-        Optional<Contact> contactByEmail = contactRepository.findByEmail(email);
+        // Find contacts by email and phone number
+        Optional<Contact> contactByEmail = Optional.empty();
+        Optional<Contact> contactByPhone = Optional.empty();
+        
+        if (email != null) {
+            contactByEmail = contactRepository.findFirstByEmail(email);
+        }
+        
+        if (phoneNumber != null) {
+            contactByPhone = contactRepository.findFirstByPhoneNumber(phoneNumber);
+        }
 
-        Contact primaryContact = null;
-        if (contactByPhone.isPresent()) {
-            primaryContact = getPrimaryContact(contactByPhone.get());
+        Contact primaryContact;
+        
+        if (contactByEmail.isPresent() && contactByPhone.isPresent()) {
+            Contact emailContact = contactByEmail.get();
+            Contact phoneContact = contactByPhone.get();
+            if (emailContact.getId().equals(phoneContact.getId())) {
+                primaryContact = emailContact;
+            } else {
+                // Determine which contact is older
+                primaryContact = emailContact.getCreatedAt().isBefore(phoneContact.getCreatedAt()) ? emailContact : phoneContact;
+                Contact secondaryContact = emailContact.getCreatedAt().isAfter(phoneContact.getCreatedAt()) ? emailContact : phoneContact;
+                secondaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+                secondaryContact.setLinkedId(primaryContact.getId());
+                contactRepository.save(secondaryContact);
+            }
         } else if (contactByEmail.isPresent()) {
-            primaryContact = getPrimaryContact(contactByEmail.get());
-        }
-
-        if (primaryContact == null) {
-            Contact newContact = createNewPrimaryContact(phoneNumber, email);
-            return buildContactResponse(newContact);
+            primaryContact = contactByEmail.get();
+            createNewSecondaryContact(primaryContact, phoneNumber, email);
+        } else if (contactByPhone.isPresent()) {
+            primaryContact = contactByPhone.get();
+            createNewSecondaryContact(primaryContact, phoneNumber, email);
         } else {
-            Contact newSecondaryContact = createNewSecondaryContact(primaryContact, phoneNumber, email);
-            return buildContactResponse(primaryContact);
+            primaryContact = createNewPrimaryContact(phoneNumber, email);
         }
-    }
-
-    private Contact getPrimaryContact(Contact contact) {
-        if (contact.getLinkPrecedence() == LinkPrecedence.PRIMARY) {
-            return contact;
-        } else {
-            return contactRepository.findById(contact.getLinkedId()).orElse(null);
-        }
+        return buildContactResponse(primaryContact);
     }
 
     private Contact createNewPrimaryContact(String phoneNumber, String email) {
@@ -59,7 +71,8 @@ public class ContactService {
         return contactRepository.save(contact);
     }
 
-    private Contact createNewSecondaryContact(Contact primaryContact, String phoneNumber, String email) {
+    private void createNewSecondaryContact(Contact primaryContact, String phoneNumber, String email) {
+    	if(phoneNumber==null || email==null)return;
         Contact contact = new Contact();
         contact.setPhoneNumber(phoneNumber);
         contact.setEmail(email);
@@ -67,16 +80,32 @@ public class ContactService {
         contact.setLinkPrecedence(LinkPrecedence.SECONDARY);
         contact.setCreatedAt(LocalDateTime.now());
         contact.setCreatedAt(LocalDateTime.now());
-        return contactRepository.save(contact);
+        contactRepository.save(contact);
     }
 
     private ContactResponse buildContactResponse(Contact primaryContact) {
         List<Contact> relatedContacts = contactRepository.findAllByLinkedIdOrId(primaryContact.getId(), primaryContact.getId());
 
-        List<String> emails = relatedContacts.stream().map(Contact::getEmail).distinct().filter(Objects::nonNull).collect(Collectors.toList());
-        List<String> phoneNumbers = relatedContacts.stream().map(Contact::getPhoneNumber).distinct().filter(Objects::nonNull).collect(Collectors.toList());
-        List<Integer> secondaryContactIds = relatedContacts.stream().filter(c -> c.getLinkPrecedence() == LinkPrecedence.SECONDARY).map(Contact::getId).collect(Collectors.toList());
+        List<String> emails = new ArrayList<>();
+        List<String> phoneNumbers = new ArrayList<>();
+        List<Integer> secondaryContactIds = new ArrayList<>();
+
+        Set<String> emailSet = new HashSet<>();
+        Set<String> phoneNumberSet = new HashSet<>();
+
+        for (Contact contact : relatedContacts) {
+            if (contact.getEmail() != null && emailSet.add(contact.getEmail())) {
+                emails.add(contact.getEmail());
+            }
+            if (contact.getPhoneNumber() != null && phoneNumberSet.add(contact.getPhoneNumber())) {
+                phoneNumbers.add(contact.getPhoneNumber());
+            }
+            if (contact.getLinkPrecedence() == LinkPrecedence.SECONDARY) {
+                secondaryContactIds.add(contact.getId());
+            }
+        }
 
         return new ContactResponse(primaryContact.getId(), emails, phoneNumbers, secondaryContactIds);
     }
+
 }
